@@ -6,6 +6,7 @@
 
 mod anim;
 mod ipc;
+mod mru;
 mod options;
 mod switcher;
 

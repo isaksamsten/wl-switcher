@@ -18,8 +18,8 @@ pub struct Options {
     #[arg(value_enum, required_unless_present_any = ["daemon", "list"])]
     pub action: Option<Action>,
 
-    /// Ext toplevel identifiers in most-recently-used order, focused first
-    /// (default: the daemon's own order)
+    /// Ext toplevel identifiers of the windows to show (default: all). The
+    /// order is the daemon's focus order; unfocused windows keep this order
     #[arg(value_name = "ID")]
     pub ids: Vec<String>,
 

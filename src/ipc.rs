@@ -25,8 +25,9 @@ pub enum Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub command: Command,
-    /// Ext toplevel identifiers in most-recently-used order, focused first.
-    /// Empty: the daemon's own order. Ignored while open.
+    /// Ext toplevel identifiers of the windows to show; empty: all. A
+    /// filter: the daemon orders them by focus (see mru.rs). Ignored while
+    /// open.
     pub ids: Vec<String>,
     /// The output to show on, by name.
     pub output: Option<String>,
