@@ -9,6 +9,9 @@
 //! Vertically, from the top: padding, the icons, the window dots, the
 //! selected app's label, padding. The highlight covers the icon and its
 //! dots.
+//!
+//! With the strip open, the bar stays: the strip's app gives way to a slot
+//! as wide as the strip, pushing its neighbors aside (`Expanded`).
 
 /// Icons never shrink below this (unless configured smaller).
 pub const MIN_ICON: f64 = 48.0;
@@ -42,22 +45,12 @@ impl Rect {
     /// From `self` (`t` = 0) to `to` (`t` = 1).
     pub fn lerp(self, to: Rect, t: f64) -> Rect {
         let l = |a: f64, b: f64| a + (b - a) * t;
-        Rect::new(
-            l(self.x, to.x),
-            l(self.y, to.y),
-            l(self.w, to.w),
-            l(self.h, to.h),
-        )
+        Rect::new(l(self.x, to.x), l(self.y, to.y), l(self.w, to.w), l(self.h, to.h))
     }
 
     /// Scaled by `s` around the point (`cx`, `cy`).
     pub fn scaled(self, s: f64, cx: f64, cy: f64) -> Rect {
-        Rect::new(
-            cx + (self.x - cx) * s,
-            cy + (self.y - cy) * s,
-            self.w * s,
-            self.h * s,
-        )
+        Rect::new(cx + (self.x - cx) * s, cy + (self.y - cy) * s, self.w * s, self.h * s)
     }
 
     /// Scaled by `s` around its center.
@@ -120,6 +113,60 @@ pub struct Layout {
     pub max_scroll: f64,
     apps: usize,
     pad: f64,
+    /// The widest the space between the paddings gets.
+    max_inner: f64,
+    out_w: f64,
+}
+
+/// The bar with the strip open: app `app`'s icon gives way to a slot
+/// `slot` wide, which pushes its neighbors aside. The panel widens to
+/// match, up to the widest it gets; past that, the row scrolls to center
+/// the slot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Expanded {
+    pub panel: Rect,
+    pub clip: (f64, f64),
+    pub app: usize,
+    pub slot: f64,
+    /// Where icon 0 starts.
+    row_x: f64,
+    step: f64,
+    icon: f64,
+    icon_y: f64,
+    /// The cells' (highlight's) vertical extent, for hits.
+    cell: (f64, f64),
+    apps: usize,
+}
+
+impl Expanded {
+    /// Icon `i`; the strip's app's sits centered in the slot.
+    pub fn icon_rect(&self, i: usize) -> Rect {
+        let x = self.row_x + i as f64 * self.step;
+        let x = match i.cmp(&self.app) {
+            std::cmp::Ordering::Less => x,
+            std::cmp::Ordering::Equal => x + ((self.slot - self.icon) / 2.0).round(),
+            std::cmp::Ordering::Greater => x + self.slot - self.icon,
+        };
+        Rect::new(x, self.icon_y, self.icon, self.icon)
+    }
+
+    /// The slot's horizontal center.
+    pub fn slot_center(&self) -> f64 {
+        self.row_x + self.app as f64 * self.step + self.slot / 2.0
+    }
+
+    /// The app (other than the strip's) whose icon, or the space around
+    /// it, is at (`x`, `y`).
+    pub fn hit(&self, x: f64, y: f64) -> Option<usize> {
+        if x < self.clip.0 || x >= self.clip.1 || y < self.cell.0 || y >= self.cell.1 {
+            return None;
+        }
+        let half = (self.step - self.icon) / 2.0;
+        (0..self.apps).filter(|&i| i != self.app).find(|&i| {
+            let r = self.icon_rect(i);
+            x >= r.x - half && x < r.right() + half
+        })
+    }
 }
 
 impl Layout {
@@ -180,6 +227,49 @@ impl Layout {
             max_scroll: (content - inner).max(0.0),
             apps: p.apps,
             pad,
+            max_inner: (max_w - 2.0 * pad).max(inner),
+            out_w,
+        }
+    }
+
+    /// The widest slot `expand` makes room for while keeping the slot's
+    /// neighbors in view.
+    pub fn max_slot(&self) -> f64 {
+        let neighbors = self.apps.saturating_sub(1).min(2) as f64;
+        (self.max_inner - neighbors * self.step).max(self.icon)
+    }
+
+    /// The bar with app `app`'s icon making way for a slot `slot` wide
+    /// (at most `max_slot`).
+    pub fn expand(&self, app: usize, slot: f64) -> Expanded {
+        let n = self.apps.max(1) as f64;
+        let gap = self.step - self.icon;
+        let slot = slot.round().min(self.max_slot().floor()).max(self.icon);
+        let content = n * self.step - gap + (slot - self.icon);
+        let inner0 = self.panel.w - 2.0 * self.pad;
+        let inner = content.min(self.max_inner).max(inner0);
+        let panel_w = inner + 2.0 * self.pad;
+        let panel_x = ((self.out_w - panel_w) / 2.0).round();
+        let start = panel_x + self.pad;
+        let row_x = if content <= inner {
+            start + ((inner - content) / 2.0).round()
+        } else {
+            let center = app as f64 * self.step + slot / 2.0;
+            start - (center - inner / 2.0).clamp(0.0, content - inner).round()
+        };
+        let hl = self.highlight_rect(0.0);
+        let p = self.highlight_pad;
+        Expanded {
+            panel: Rect::new(panel_x, self.panel.y, panel_w, self.panel.h),
+            clip: (start - p, start + inner + p),
+            app,
+            slot,
+            row_x,
+            step: self.step,
+            icon: self.icon,
+            icon_y: self.icon_y,
+            cell: (hl.y, hl.bottom()),
+            apps: self.apps,
         }
     }
 
@@ -193,12 +283,7 @@ impl Layout {
     pub fn highlight_rect(&self, x: f64) -> Rect {
         let p = self.highlight_pad;
         let bottom = self.dots_y + self.dot + p;
-        Rect::new(
-            x - p,
-            self.icon_y - p,
-            self.icon + 2.0 * p,
-            bottom - (self.icon_y - p),
-        )
+        Rect::new(x - p, self.icon_y - p, self.icon + 2.0 * p, bottom - (self.icon_y - p))
     }
 
     /// The scroll offset that brings icon `i` into view from `current`,
@@ -208,9 +293,7 @@ impl Layout {
             return 0.0;
         }
         let inner = (self.panel.x + self.pad, self.panel.right() - self.pad);
-        let margin = (self.step / 2.0)
-            .min((inner.1 - inner.0 - self.icon) / 2.0)
-            .max(0.0);
+        let margin = (self.step / 2.0).min((inner.1 - inner.0 - self.icon) / 2.0).max(0.0);
         let r = self.icon_rect(i, current);
         let mut scroll = current;
         if r.x - margin < inner.0 {
@@ -348,4 +431,51 @@ mod tests {
         let r = l.icon_rect(30, 500.0);
         assert_eq!(l.hit(r.x + 1.0, r.y + 1.0, 500.0), Some(30));
     }
+
+    #[test]
+    fn expanding_pushes_neighbors_aside() {
+        let l = Layout::new(&params(3));
+        let e = l.expand(1, 500.0);
+        assert_eq!(e.slot, 500.0);
+        // The panel widens around the slot, still centered.
+        assert_eq!(e.panel.w, l.panel.w + 500.0 - l.icon);
+        assert_eq!((e.panel.y, e.panel.h), (l.panel.y, l.panel.h));
+        assert!((e.panel.center().0 - 960.0).abs() <= 0.5);
+        // Neighbors keep their gap to the slot; the app's icon is in it.
+        let gap = l.step - l.icon;
+        let (a, b) = (e.icon_rect(0), e.icon_rect(2));
+        let slot_x = e.slot_center() - 250.0;
+        assert_eq!(a.right() + gap, slot_x);
+        assert_eq!(slot_x + 500.0 + gap, b.x);
+        assert!((e.icon_rect(1).center().0 - e.slot_center()).abs() <= 0.5);
+        assert!(a.x >= e.clip.0 && b.right() <= e.clip.1);
+        // Hits skip the slot.
+        assert_eq!(e.hit(a.x + 1.0, a.y + 1.0), Some(0));
+        assert_eq!(e.hit(b.x + 1.0, b.y + 1.0), Some(2));
+        assert_eq!(e.hit(e.slot_center(), a.y + 1.0), None);
+    }
+
+    #[test]
+    fn expanding_a_full_bar_keeps_the_neighbors_in_view() {
+        for apps in [12, 60] {
+            let l = Layout::new(&params(apps));
+            let slot = l.max_slot();
+            assert!(slot > 500.0);
+            for app in [0, 1, apps / 2, apps - 2, apps - 1] {
+                let e = l.expand(app, 5000.0);
+                assert_eq!(e.slot, slot.floor());
+                assert!(e.panel.w <= 1920.0 * 0.9 + 1.0, "{e:?}");
+                let lo = app.saturating_sub(1);
+                let hi = (app + 1).min(apps - 1);
+                for i in lo..=hi {
+                    let r = e.icon_rect(i);
+                    assert!(r.x >= e.clip.0 && r.right() <= e.clip.1, "{apps} {app} {i}");
+                }
+            }
+        }
+        // One app: no neighbors to make room for.
+        let l = Layout::new(&params(1));
+        assert!(l.max_slot() > 1000.0);
+    }
 }
+

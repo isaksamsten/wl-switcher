@@ -7,22 +7,26 @@
 //! frame.
 //!
 //! Everything is a subsurface scaled with a viewport, in stacking order:
-//! the dim tint; the bar (panel with its shadow, highlight, one icon and one
-//! dot row per app, two labels that crossfade); the strip (per card: four
-//! shadow strips and the preview; the icon the selected card grows out of;
-//! the selection border; two title pills that crossfade). The subsurfaces
-//! are sync: each frame repositions and re-alphas them, then commits the
-//! parent once, so the frame updates atomically.
+//! the dim tint; the bar (panel with its shadow in three slices, so it can
+//! widen; highlight, one icon and one dot row per app, two labels that
+//! crossfade); the strip (per card: four shadow strips and the preview;
+//! the icon the selected card grows out of; two title pills that
+//! crossfade). The subsurfaces are sync: each frame repositions and
+//! re-alphas them, then commits the parent once, so the frame updates
+//! atomically.
 //!
 //! Movement runs on springs (anim.rs), advanced on frame callbacks by the
 //! time measured since the last one. Input only retargets springs and
 //! requests a frame; once everything has settled, no more frames are
 //! requested, so an idle switcher costs nothing.
 //!
-//! Windows mode is a morph (`morph`, 0 to 1): the bar fades out and shrinks
-//! a little toward the selected icon, while the strip's cards grow out of
-//! that icon into their places (strip.rs), staggered by their distance from
-//! the selected card. Tab runs it back toward the newly selected icon.
+//! Windows mode is a morph (`morph`, 0 to 1). The bar stays: the strip's
+//! app's icon gives way to a slot as wide as the strip, pushing the other
+//! icons aside (bar::Expanded), while the strip's cards grow out of that
+//! icon into their places (strip.rs), staggered by their distance from
+//! the selected card. The highlight and label fade; the selected card is
+//! marked by its zoom alone. Tab runs the morph back into the strip's
+//! app's icon while the highlight moves on.
 //!
 //! Previews are captures (capture.rs), planned so the morph never shows
 //! placeholders: one frame of the selected app's windows and its
@@ -75,8 +79,6 @@ use crate::worker::{Assets, LabelKey, PillRequest};
 
 /// The bar's scale when it starts fading in.
 const OPEN_SCALE: f64 = 0.92;
-/// The bar's scale with the strip open.
-const MORPH_SCALE: f64 = 0.96;
 /// Spring responses, ms.
 const OPEN_RESPONSE: f64 = 120.0;
 pub const CLOSE_MS: u64 = 100;
@@ -84,8 +86,6 @@ pub const CLOSE_MS: u64 = 100;
 const MAX_DOTS: usize = 3;
 /// Space between strip cards (plus room for the zoom), logical pixels.
 const CARD_GAP: f64 = 16.0;
-/// The selection border's width.
-const BORDER: f64 = 3.0;
 /// The title pill's distance from the bottom of its card.
 const TITLE_INSET: f64 = 10.0;
 /// How much the icon the selected card grows out of grows with it.
@@ -253,7 +253,8 @@ impl Drop for Sub {
 /// the order.
 struct Scene {
     dim: Option<Sub>,
-    panel: Sub,
+    /// Left, middle (stretched), right.
+    panel: [Sub; 3],
     highlight: Sub,
     /// Per app.
     icons: Vec<Sub>,
@@ -264,10 +265,8 @@ struct Scene {
     shadows: Vec<[Sub; 4]>,
     /// Per strip card.
     previews: Vec<Sub>,
-    /// The selected app's icon, which the selected card grows out of.
+    /// The strip's app's icon, which the selected card grows out of.
     morph_icon: Sub,
-    /// Top, bottom, left, right.
-    border: [Sub; 4],
     titles: [Sub; 2],
 }
 
@@ -284,7 +283,7 @@ impl Scene {
         let sub = || Sub::new(g, parent, no_input, qh);
         Self {
             dim: dim.then(sub),
-            panel: sub(),
+            panel: [sub(), sub(), sub()],
             highlight: sub(),
             icons: (0..apps).map(|_| sub()).collect(),
             dots: (0..apps).map(|_| sub()).collect(),
@@ -292,7 +291,6 @@ impl Scene {
             shadows: (0..cards).map(|_| [sub(), sub(), sub(), sub()]).collect(),
             previews: (0..cards).map(|_| sub()).collect(),
             morph_icon: sub(),
-            border: [sub(), sub(), sub(), sub()],
             titles: [sub(), sub()],
         }
     }
@@ -410,6 +408,8 @@ struct Strip {
     layout: strip::Layout,
     /// Per card, the sides of its shadow; empty without shadows.
     shadows: Vec<[Option<Shape>; 4]>,
+    /// The bar with room made for the strip.
+    bar: bar::Expanded,
 }
 
 struct Style {
@@ -457,7 +457,6 @@ pub struct Overlay {
     transparent: WlBuffer,
     dim_buffer: Option<WlBuffer>,
     placeholder: WlBuffer,
-    border_buffer: WlBuffer,
     /// Title pills made during this show; any may still be attached.
     title_buffers: Vec<WlBuffer>,
     /// One per seat; destroyed before the surface.
@@ -547,7 +546,6 @@ impl Overlay {
             .then(|| cache::color_buffer(&g, (config.dim * 255.0).round() as u32, qh))
             .transpose()?;
         let placeholder = cache::color_buffer(&g, theme.placeholder, qh)?;
-        let border_buffer = cache::color_buffer(&g, theme.border_color, qh)?;
         let no_input = Region::new(&g.compositor).map_err(std::io::Error::other)?;
 
         let surface = g.compositor.create_surface(qh);
@@ -592,7 +590,6 @@ impl Overlay {
             transparent,
             dim_buffer,
             placeholder,
-            border_buffer,
             title_buffers: Vec::new(),
             inhibitors: Vec::new(),
             switcher,
@@ -867,10 +864,13 @@ impl Overlay {
         let Some(app_id) = self.strip_app() else {
             return;
         };
-        let Some(app) = (self.switcher.apps().iter()).find(|a| a.app_id == app_id) else {
+        let Some(l) = &self.layout else { return };
+        let apps = self.switcher.apps();
+        let Some(index) = apps.iter().position(|a| a.app_id == app_id) else {
             self.strip = None;
             return;
         };
+        let app = &apps[index];
         let all = self.switcher.windows();
         let windows: Vec<String> = (app.windows.iter()).map(|&i| all[i].id.clone()).collect();
         let (out_w, out_h) = (self.width as f64, self.height as f64);
@@ -889,19 +889,22 @@ impl Overlay {
             true => (self.style.icon_size as f64).min(out_h * self.style.card_height),
             false => out_h * self.style.card_height,
         };
-        let center_y = match &self.layout {
-            Some(l) => l.panel.center().1,
-            None => out_h * self.style.position,
-        };
-        let layout = strip::Layout::new(&strip::Params {
+        let center_y = l.panel.center().1;
+        // Narrow enough that the bar keeps the strip's neighbors in view.
+        let zoom = self.style.zoom.max(1.0);
+        let room = ((l.max_slot() - self.style.gap) / zoom).floor();
+        let mut layout = strip::Layout::new(&strip::Params {
             aspects,
             card_height,
-            max_width: out_w * self.style.strip_max_width,
+            max_width: (out_w * self.style.strip_max_width).min(room),
             gap: CARD_GAP,
-            zoom: self.style.zoom,
+            zoom,
             center_y,
             output: (out_w, out_h),
         });
+        // The slot: the widest card zoomed, plus half a gap on either side.
+        let expanded = l.expand(index, (layout.width() * zoom).ceil() + self.style.gap);
+        layout.set_center_x(expanded.slot_center());
         let shadows = match self.style.shadow.filter(|_| !off) {
             Some(settings) => {
                 let mut cache = self.cache.borrow_mut();
@@ -925,6 +928,7 @@ impl Overlay {
             windows,
             layout,
             shadows,
+            bar: expanded,
         });
         self.retarget_strip(fresh);
         self.update_title();
@@ -1389,17 +1393,38 @@ impl Overlay {
         let s_open = lerp(OPEN_SCALE, 1.0, self.open.value);
         let (pcx, pcy) = l.panel.center();
         let scroll = self.scroll.value;
-        // The selected icon: where the strip grows from, and what the bar
-        // shrinks toward.
-        let icon = l
-            .icon_rect(self.switcher.selected_app(), scroll)
-            .scaled(s_open, pcx, pcy);
-        let (icx, icy) = icon.center();
-        let s_morph = lerp(1.0, MORPH_SCALE, morph);
-        let xf =
-            move |r: bar::Rect| IRect::round(r.scaled(s_open, pcx, pcy).scaled(s_morph, icx, icy));
+        let xf = move |r: bar::Rect| IRect::round(r.scaled(s_open, pcx, pcy));
         let scale = self.scale as f64;
-        let alpha = self.gate(base * (1.0 - morph));
+        // The bar stays with the strip open; the highlight and label fade.
+        let alpha = self.gate(base);
+        let sel_alpha = self.gate(base * (1.0 - morph));
+        let expanded = (self.strip.as_ref())
+            .map(|s| s.bar.clone())
+            .filter(|_| morph > 0.0);
+        let ex = expanded.as_ref();
+        // Icon `i`, on its way to making room for the strip.
+        let icon_at = |i: usize| {
+            let r = l.icon_rect(i, scroll);
+            ex.map_or(r, |e| r.lerp(e.icon_rect(i), morph))
+        };
+        let panel = ex.map_or(l.panel, |e| l.panel.lerp(e.panel, morph));
+        let clip = ex.map_or(l.clip, |e| {
+            (lerp(l.clip.0, e.clip.0, morph), lerp(l.clip.1, e.clip.1, morph))
+        });
+        // How far the row has moved at `x` (an icon's left edge in the
+        // unexpanded row), between the icons around it.
+        let last = self.switcher.apps().len().saturating_sub(1) as f64;
+        let shift = |x: f64| {
+            let Some(e) = ex else { return 0.0 };
+            let f = ((x - l.icon_rect(0, scroll).x) / l.step).clamp(0.0, last);
+            let (a, b) = (f.floor() as usize, f.ceil() as usize);
+            let d = |i: usize| e.icon_rect(i).x - l.icon_rect(i, scroll).x;
+            lerp(d(a), d(b), f - a as f64) * morph
+        };
+        // The strip's app's icon, where its cards grow from (the selected
+        // one's without a strip).
+        let icon = icon_at(ex.map_or(self.switcher.selected_app(), |e| e.app))
+            .scaled(s_open, pcx, pcy);
         let dim_alpha = self.gate(base);
         let scene = &mut self.scene;
 
@@ -1408,24 +1433,42 @@ impl Overlay {
             dim.present(Some(buffer), full, dim_alpha);
         }
 
+        // In three slices, so it widens without stretching its corners: the
+        // ends as they are, the middle column stretched between them.
         match &self.panel_shape {
             Some(shape) if alpha > 0.0 => {
                 let r = shape.rect;
-                let rect = bar::Rect::new(
-                    l.panel.x + r.x as f64,
-                    l.panel.y + r.y as f64,
-                    r.w as f64,
-                    r.h as f64,
+                let (rw, rh) = (r.w as f64, r.h as f64);
+                let full = bar::Rect::new(
+                    panel.x + r.x as f64,
+                    panel.y + r.y as f64,
+                    rw + (panel.w - l.panel.w),
+                    rh,
                 );
-                scene.panel.show(&shape.buffer);
-                scene.panel.place(xf(rect));
-                scene.panel.set_alpha(alpha);
+                let cap = ((rw / 2.0).floor() - 1.0).max(1.0);
+                let parts = [
+                    (full.x, cap, 0.0, cap),
+                    (full.x + cap, full.w - 2.0 * cap, cap, rw - 2.0 * cap),
+                    (full.right() - cap, cap, rw - cap, cap),
+                ];
+                for (sub, (x, w, sx, sw)) in scene.panel.iter_mut().zip(parts) {
+                    sub.show(&shape.buffer);
+                    sub.crop(Some([sx * scale, 0.0, sw * scale, rh * scale]));
+                    sub.place(xf(bar::Rect::new(x, full.y, w, rh)));
+                    sub.set_alpha(alpha);
+                    sub.commit();
+                }
             }
-            _ => scene.panel.hide(),
+            _ => {
+                for sub in &mut scene.panel {
+                    sub.hide();
+                    sub.commit();
+                }
+            }
         }
-        scene.panel.commit();
 
         let hl_x = self.highlight_x.value - scroll;
+        let hl_x = hl_x + shift(hl_x);
         let hl = l.highlight_rect(hl_x);
         place_clipped(
             &mut scene.highlight,
@@ -1434,23 +1477,26 @@ impl Overlay {
                 (&s.buffer, size)
             }),
             hl,
-            l.clip,
+            clip,
             &xf,
-            alpha,
+            sel_alpha,
         );
 
         let cache = self.cache.borrow();
         for (i, app) in self.switcher.apps().iter().enumerate() {
-            let r = l.icon_rect(i, scroll);
+            let r = icon_at(i);
+            // The strip's app's icon became the strip (and the icon its
+            // selected card grows out of).
+            let strip_app = ex.is_some_and(|e| e.app == i);
             let key = icons::Key {
                 app_id: app.app_id.clone(),
                 size: self.style.icon_size * self.scale as u32,
                 theme: self.style.icon_theme.clone(),
             };
-            let buffer = cache.icon(&key);
+            let buffer = cache.icon(&key).filter(|_| !strip_app);
             let size = key.size as f64;
             let icon = buffer.as_ref().map(|b| (b, (size, size)));
-            place_clipped(&mut scene.icons[i], icon, r, l.clip, &xf, alpha);
+            place_clipped(&mut scene.icons[i], icon, r, clip, &xf, alpha);
 
             let dots = self.dot_shapes.get(i).and_then(|s| s.as_ref()).map(|s| {
                 let rect = bar::Rect::new(
@@ -1463,9 +1509,10 @@ impl Overlay {
                 (&s.buffer, size, rect)
             });
             let sub = &mut scene.dots[i];
+            let a = if strip_app { sel_alpha } else { alpha };
             match dots {
                 Some((buffer, size, rect)) => {
-                    place_clipped(sub, Some((buffer, size)), rect, l.clip, &xf, alpha)
+                    place_clipped(sub, Some((buffer, size)), rect, clip, &xf, a)
                 }
                 None => {
                     sub.hide();
@@ -1477,7 +1524,7 @@ impl Overlay {
 
         // The label follows the highlight, within the panel.
         let center = hl_x + l.icon / 2.0;
-        let (lo, hi) = (l.clip.0 + l.highlight_pad, l.clip.1 - l.highlight_pad);
+        let (lo, hi) = (clip.0 + l.highlight_pad, clip.1 - l.highlight_pad);
         for k in 0..2 {
             let sub = &mut scene.labels[k];
             let Some(label) = &self.label.shown[k] else {
@@ -1487,11 +1534,11 @@ impl Overlay {
             };
             let w = label.width as f64;
             let x = if w >= hi - lo {
-                l.panel.x + (l.panel.w - w) / 2.0
+                panel.x + (panel.w - w) / 2.0
             } else {
                 (center - w / 2.0).clamp(lo, hi - w)
             };
-            let a = alpha * self.label.alpha(k);
+            let a = sel_alpha * self.label.alpha(k);
             if a <= 0.0 {
                 sub.hide();
                 sub.commit();
@@ -1506,18 +1553,18 @@ impl Overlay {
         self.place_strip(icon, base, morph);
     }
 
-    /// The strip's cards, each morphing from `icon` (the selected app's
-    /// icon) to its place by `morph`, the selection border and the title.
+    /// The strip's cards, each morphing from `icon` (the strip's app's
+    /// icon) to its place by `morph`, and the title. The selected card is
+    /// marked by its zoom alone.
     fn place_strip(&mut self, icon: bar::Rect, base: f64, morph: f64) {
         let gate = |a: f64| self.gate(a);
         let late = |m: f64| ((m - 0.5) * 2.0).clamp(0.0, 1.0);
-        let border_alpha = gate(base * late(morph));
         let icon_alpha = match morph > 0.0 {
             true => gate(base * (1.0 - 2.0 * morph)),
             false => 0.0,
         };
         // The cards' app: while the strip collapses after Tab, the
-        // selected app is the next one already.
+        // selected app is the next one already; `icon` is the cards'.
         let strip_icon =
             (self.strip.as_ref()).and_then(|s| self.cache.borrow().icon(&self.icon_key(&s.app_id)));
         let card_alphas: Vec<f64> = match &self.strip {
@@ -1536,7 +1583,6 @@ impl Overlay {
             let subs = (scene.shadows.iter_mut().flatten())
                 .chain(&mut scene.previews)
                 .chain([&mut scene.morph_icon])
-                .chain(&mut scene.border)
                 .chain(&mut scene.titles);
             for sub in subs {
                 sub.hide();
@@ -1622,18 +1668,6 @@ impl Overlay {
         let r = selected.centered_square(icon.w * growth);
         scene.morph_icon.present(strip_icon.as_ref(), r, icon_alpha);
 
-        let b = BORDER;
-        let (x, y, w, h) = (selected.x, selected.y, selected.w, selected.h);
-        let sides = [
-            bar::Rect::new(x - b, y - b, w + 2.0 * b, b),
-            bar::Rect::new(x - b, y + h, w + 2.0 * b, b),
-            bar::Rect::new(x - b, y, b, h),
-            bar::Rect::new(x + w, y, b, h),
-        ];
-        for (sub, r) in scene.border.iter_mut().zip(sides) {
-            sub.present(Some(&self.border_buffer), r, border_alpha);
-        }
-
         // The title sits on the bottom of the selected card.
         let (cx, _) = selected.center();
         let titles = (scene.titles.iter_mut())
@@ -1662,11 +1696,15 @@ impl Overlay {
                 return Hit::Panel;
             };
             let off = self.strip_offset.value;
-            return match s.layout.hit(x, y, off) {
-                Some(i) => Hit::Window(i),
-                None if s.layout.bounds(off).contains(x, y) => Hit::Panel,
-                None => Hit::Outside,
-            };
+            if let Some(i) = s.layout.hit(x, y, off) {
+                return Hit::Window(i);
+            }
+            // The other apps stay in the bar beside the strip.
+            if let Some(i) = s.bar.hit(x, y) {
+                return Hit::App(i);
+            }
+            let inside = s.layout.bounds(off).contains(x, y) || s.bar.panel.contains(x, y);
+            return if inside { Hit::Panel } else { Hit::Outside };
         }
         match l.hit(x, y, self.scroll.value) {
             Some(i) => Hit::App(i),
@@ -1716,7 +1754,6 @@ impl Drop for Overlay {
         self.viewport.destroy();
         self.transparent.destroy();
         self.placeholder.destroy();
-        self.border_buffer.destroy();
         if let Some(b) = &self.dim_buffer {
             b.destroy();
         }

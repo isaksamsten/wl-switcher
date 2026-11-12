@@ -32,7 +32,7 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
 use crate::app::App;
 use crate::config::Modifier;
 use crate::overlay::Hit;
-use crate::switcher::Step;
+use crate::switcher::{Mode, Step};
 
 /// linux/input-event-codes.h
 const BTN_LEFT: u32 = 0x110;
@@ -422,7 +422,11 @@ impl PointerHandler for App {
                 PointerEventKind::Motion { .. } => {
                     self.input.pointer_pos = (x, y);
                     match overlay.hit(x, y) {
-                        Hit::App(i) => overlay.select_app(i),
+                        // Not with the strip open: the pointer crossing
+                        // the bar beside it shouldn't collapse it.
+                        Hit::App(i) if overlay.switcher.mode() == Mode::Apps => {
+                            overlay.select_app(i)
+                        }
                         Hit::Window(i) => overlay.select_window(i),
                         _ => {}
                     }
