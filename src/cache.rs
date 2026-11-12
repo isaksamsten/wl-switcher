@@ -5,9 +5,9 @@
 //! - Icons and app name labels, by key (one per app and output scale).
 //!   They are rendered by the worker; `App` turns the results into buffers
 //!   as they arrive.
-//! - Shapes: the panel with its shadow, the highlight and the window dots,
-//!   rendered here on first use for a size, color and scale. The most
-//!   recently used few are kept.
+//! - Shapes: the panel with its shadow, the highlight, the window dots and
+//!   the strip cards' shadows, rendered here on first use for a size,
+//!   color and scale. The most recently used few dozen are kept.
 //!
 //! Buffers are only destroyed between shows (`trim`): one replaced during a
 //! show may still be attached, or about to be with the next parent commit.
@@ -28,8 +28,9 @@ use crate::shadow;
 use crate::text;
 use crate::worker::LabelKey;
 
-/// Shapes kept between shows.
-const MAX_SHAPES: usize = 12;
+/// Shapes kept between shows: a strip of a dozen cards has four shadow
+/// strips each.
+const MAX_SHAPES: usize = 64;
 
 /// A buffer and its logical size.
 #[derive(Clone, Debug)]
@@ -74,10 +75,20 @@ pub enum ShapeKey {
         color: u32,
         scale: i32,
     },
+    /// One side (top, bottom, left, right) of the shadow of a `w`x`h`
+    /// card with square corners; its rect is relative to the card.
+    CardShadow {
+        w: i32,
+        h: i32,
+        shadow: shadow::Settings,
+        side: u8,
+        scale: i32,
+    },
 }
 
 impl ShapeKey {
-    fn render(&self) -> (Image, shadow::Rect) {
+    /// The image and where it goes; None if there is nothing to draw.
+    fn render(&self) -> Option<(Image, shadow::Rect)> {
         let rect = |w, h| shadow::Rect { x: 0, y: 0, w, h };
         match *self {
             ShapeKey::Panel {
@@ -89,7 +100,7 @@ impl ShapeKey {
                 scale,
             } => {
                 let p = shadow::panel(w, h, radius as f64, color, shadow.as_ref(), scale);
-                (p.image, p.rect)
+                Some((p.image, p.rect))
             }
             ShapeKey::Rect {
                 w,
@@ -99,7 +110,7 @@ impl ShapeKey {
                 scale,
             } => {
                 let img = text::rounded_rect(w * scale, h * scale, (radius * scale) as f64, color);
-                (img, rect(w, h))
+                Some((img, rect(w, h)))
             }
             ShapeKey::Dots {
                 count,
@@ -109,7 +120,24 @@ impl ShapeKey {
             } => {
                 let count = count.max(1) as i32;
                 let w = (2 * count - 1) * size;
-                (dots(count, size * scale, color), rect(w, size))
+                Some((dots(count, size * scale, color), rect(w, size)))
+            }
+            ShapeKey::CardShadow {
+                w,
+                h,
+                shadow,
+                side,
+                scale,
+            } => {
+                let strip = shadow::render(w, h, &shadow, scale)
+                    .into_iter()
+                    .nth(side as usize)??;
+                let img = Image {
+                    width: strip.width,
+                    height: strip.height,
+                    data: strip.pixels,
+                };
+                Some((img, strip.rect))
             }
         }
     }
@@ -210,13 +238,62 @@ impl Cache {
             self.shapes.insert(0, entry);
             return Some(shape);
         }
-        let (img, rect) = key.render();
+        let (img, rect) = key.render()?;
         let buffer = shm_buffer(g, &img, qh)
             .inspect_err(|e| eprintln!("wl-switcher: shape buffer: {e}"))
             .ok()?;
         let shape = Shape { buffer, rect };
         self.shapes.insert(0, (key, shape.clone()));
         Some(shape)
+    }
+
+    /// The four sides of a `w`x`h` card's shadow (top, bottom, left,
+    /// right; None where empty), rendered together if any is missing.
+    pub fn card_shadow(
+        &mut self,
+        g: &Globals,
+        (w, h): (i32, i32),
+        shadow: shadow::Settings,
+        scale: i32,
+        qh: &QueueHandle<App>,
+    ) -> [Option<Shape>; 4] {
+        let key = |side: u8| ShapeKey::CardShadow {
+            w,
+            h,
+            shadow,
+            side,
+            scale,
+        };
+        let cached = |cache: &Self, side| cache.shapes.iter().any(|(k, _)| *k == key(side));
+        if (0..4).all(|side| cached(self, side)) {
+            return [0, 1, 2, 3].map(|side| self.shape(g, key(side), qh));
+        }
+        let strips = shadow::render(w, h, &shadow, scale);
+        let mut side = 0;
+        strips.map(|strip| {
+            let k = key(side);
+            side += 1;
+            let strip = strip?;
+            let img = Image {
+                width: strip.width,
+                height: strip.height,
+                data: strip.pixels,
+            };
+            let buffer = shm_buffer(g, &img, qh)
+                .inspect_err(|e| eprintln!("wl-switcher: shadow buffer: {e}"))
+                .ok()?;
+            let shape = Shape {
+                buffer,
+                rect: strip.rect,
+            };
+            match self.shapes.iter_mut().find(|(sk, _)| *sk == k) {
+                Some((_, old)) => self
+                    .stale
+                    .push(std::mem::replace(old, shape.clone()).buffer),
+                None => self.shapes.insert(0, (k, shape.clone())),
+            }
+            Some(shape)
+        })
     }
 
     /// Forget icons and labels, e.g. because the config or the desktop
@@ -310,7 +387,7 @@ mod tests {
             color: 0xffffffff,
             scale: 2,
         };
-        let (img, rect) = key.render();
+        let (img, rect) = key.render().unwrap();
         assert_eq!((rect.w, rect.h), (15, 5));
         assert_eq!((img.width, img.height), (30, 10));
         let key = ShapeKey::Rect {
@@ -320,8 +397,28 @@ mod tests {
             color: 0xffffffff,
             scale: 3,
         };
-        let (img, rect) = key.render();
+        let (img, rect) = key.render().unwrap();
         assert_eq!((rect.w, rect.h), (30, 20));
         assert_eq!((img.width, img.height), (90, 60));
+        let shadow = shadow::Settings {
+            color: 0x00000080,
+            softness: 10.0,
+            spread: 0,
+            offset: (0, 4),
+        };
+        let key = |side| ShapeKey::CardShadow {
+            w: 100,
+            h: 60,
+            shadow,
+            side,
+            scale: 2,
+        };
+        let (img, rect) = key(2).render().unwrap();
+        assert!(rect.x < 0 && rect.w > 0);
+        assert_eq!(
+            (img.width, img.height),
+            (rect.w as u32 * 2, rect.h as u32 * 2)
+        );
+        assert!(key(4).render().is_none());
     }
 }

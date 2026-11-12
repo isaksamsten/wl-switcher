@@ -43,6 +43,10 @@ use crate::switcher::Window;
 use crate::toplevel::{self, Toplevel};
 use crate::worker::{Assets, Done};
 
+/// How long the selection must rest in apps mode before its neighborhood
+/// is captured.
+const CAPTURE_DEBOUNCE: Duration = Duration::from_millis(50);
+
 pub enum Outcome {
     /// The identifier of the picked window.
     Picked(String),
@@ -71,6 +75,8 @@ pub struct App {
     pub overlay: Option<Overlay>,
     /// The show-delay or cancel fade timer of the current show.
     timer: Option<RegistrationToken>,
+    /// The debounce before captures follow an apps-mode selection.
+    capture_timer: Option<RegistrationToken>,
     /// Set once the user picked or cancelled.
     pub outcome: Option<Outcome>,
     /// Client events for the daemon loop.
@@ -100,6 +106,7 @@ impl App {
             mru: Mru::default(),
             overlay: None,
             timer: None,
+            capture_timer: None,
             outcome: None,
             inbox: Vec::new(),
         }
@@ -329,11 +336,43 @@ impl App {
         Ok(())
     }
 
-    /// Destroy the switcher. The caller should roundtrip before acting on
-    /// the outcome, so it is gone by then.
+    /// The selection may have moved: plan the captures for it once it
+    /// rests for a moment, so Tab-cycling doesn't start a burst of
+    /// sessions.
+    pub fn schedule_captures(&mut self) {
+        if !self.overlay.as_ref().is_some_and(|o| o.captures_stale()) {
+            return;
+        }
+        if let Some(token) = self.capture_timer.take() {
+            self.loop_handle.remove(token);
+        }
+        let timer = Timer::from_duration(CAPTURE_DEBOUNCE);
+        let token = self.loop_handle.insert_source(timer, |_, _, app| {
+            app.capture_timer = None;
+            if let Some(overlay) = &mut app.overlay {
+                overlay.update_captures();
+            }
+            TimeoutAction::Drop
+        });
+        match token {
+            Ok(token) => self.capture_timer = Some(token),
+            // Then right away.
+            Err(_) => {
+                if let Some(overlay) = &mut self.overlay {
+                    overlay.update_captures();
+                }
+            }
+        }
+    }
+
+    /// Destroy the switcher, and with it its captures. The caller should
+    /// roundtrip before acting on the outcome, so it is gone by then.
     pub fn end_show(&mut self) {
         self.overlay = None;
-        if let Some(token) = self.timer.take() {
+        for token in [self.timer.take(), self.capture_timer.take()]
+            .into_iter()
+            .flatten()
+        {
             self.loop_handle.remove(token);
         }
         self.input.reset();
@@ -386,12 +425,16 @@ impl App {
         }
     }
 
-    /// Captures arrive with the strip (phase 3).
+    /// A capture event: to the show's overlay, which owns the captures.
+    /// Events of an earlier show's captures find nothing.
     pub fn capture_update(
         &mut self,
-        _: WindowId,
-        _: impl FnOnce(&mut Capture, &Globals) -> Option<CaptureEvent>,
+        id: WindowId,
+        f: impl FnOnce(&mut Capture, &Globals) -> Option<CaptureEvent>,
     ) {
+        if let Some(overlay) = &mut self.overlay {
+            overlay.capture_update(id, f);
+        }
     }
 }
 

@@ -5,11 +5,9 @@ mod anim;
 mod app;
 mod bar;
 mod cache;
-#[allow(dead_code)] // previews: phase 3
 mod capture;
 mod config;
 mod daemon;
-#[allow(dead_code)] // previews: phase 3
 mod dmabuf;
 mod globals;
 mod icons;
@@ -21,8 +19,8 @@ mod options;
 mod overlay;
 mod pixels;
 mod scheme;
-#[allow(dead_code)] // card shadows: phase 3
 mod shadow;
+mod strip;
 mod switcher;
 mod text;
 mod toplevel;

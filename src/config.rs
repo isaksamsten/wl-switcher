@@ -133,6 +133,9 @@ pub struct Theme {
     /// The window dots under icons.
     #[serde(deserialize_with = "color")]
     pub dot_color: u32,
+    /// Around the selected card in the strip.
+    #[serde(deserialize_with = "color")]
+    pub border_color: u32,
     #[serde(deserialize_with = "color")]
     pub label_color: u32,
     #[serde(deserialize_with = "color")]
@@ -166,6 +169,7 @@ impl Default for Theme {
             panel_color: 0x262626e6,
             highlight_color: 0xffffff2e,
             dot_color: 0xffffffb3,
+            border_color: 0xffffffcc,
             label_color: 0xffffffff,
             label_background: 0x00000000,
             placeholder: 0x3a3a3aff,
@@ -551,6 +555,7 @@ mod tests {
             highlight-color = "ffffff40"
             dot-color = "ffffff"
             label-color = "eeeeee"
+            border-color = "ff0000"
             label-background = "00000080"
             placeholder = "#222222"
             shadow-color = "ff000080"
@@ -580,6 +585,7 @@ mod tests {
         assert_eq!(t.panel_color, 0x00000080);
         assert_eq!(t.highlight_color, 0xffffff40);
         assert_eq!(t.dot_color, 0xffffffff);
+        assert_eq!(t.border_color, 0xff0000ff);
         assert_eq!(
             (t.label_color, t.label_background),
             (0xeeeeeeff, 0x00000080)

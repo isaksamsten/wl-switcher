@@ -11,7 +11,8 @@
 //! - Escape cancels, Return picks.
 //!
 //! Releasing the modifier picks (see `Hold`). The pointer selects what it
-//! moves over; a click picks it, a click outside the bar cancels.
+//! moves over (an icon, or a card in the strip); a click picks it, a click
+//! outside the bar or strip cancels.
 
 use smithay_client_toolkit::seat::{
     Capability, SeatHandler, SeatState,
@@ -206,6 +207,7 @@ impl App {
                 if let Some(overlay) = &mut self.overlay {
                     overlay.step(step);
                 }
+                self.schedule_captures();
             }
         }
     }
@@ -419,9 +421,12 @@ impl PointerHandler for App {
                 PointerEventKind::Leave { .. } => self.input.pointer_inside = false,
                 PointerEventKind::Motion { .. } => {
                     self.input.pointer_pos = (x, y);
-                    if let Hit::App(i) = overlay.hit(x, y) {
-                        overlay.select_app(i);
+                    match overlay.hit(x, y) {
+                        Hit::App(i) => overlay.select_app(i),
+                        Hit::Window(i) => overlay.select_window(i),
+                        _ => {}
                     }
+                    self.schedule_captures();
                 }
                 PointerEventKind::Press { button, .. } => {
                     if !overlay.visible() || !self.input.pointer_inside {
@@ -432,6 +437,10 @@ impl PointerHandler for App {
                         Hit::Outside => self.cancel(),
                         Hit::App(i) if button == BTN_LEFT => {
                             overlay.select_app(i);
+                            self.pick();
+                        }
+                        Hit::Window(i) if button == BTN_LEFT => {
+                            overlay.select_window(i);
                             self.pick();
                         }
                         _ => {}

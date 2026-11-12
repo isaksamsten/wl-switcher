@@ -38,6 +38,44 @@ impl Rect {
     pub fn bottom(&self) -> f64 {
         self.y + self.h
     }
+
+    /// From `self` (`t` = 0) to `to` (`t` = 1).
+    pub fn lerp(self, to: Rect, t: f64) -> Rect {
+        let l = |a: f64, b: f64| a + (b - a) * t;
+        Rect::new(
+            l(self.x, to.x),
+            l(self.y, to.y),
+            l(self.w, to.w),
+            l(self.h, to.h),
+        )
+    }
+
+    /// Scaled by `s` around the point (`cx`, `cy`).
+    pub fn scaled(self, s: f64, cx: f64, cy: f64) -> Rect {
+        Rect::new(
+            cx + (self.x - cx) * s,
+            cy + (self.y - cy) * s,
+            self.w * s,
+            self.h * s,
+        )
+    }
+
+    /// Scaled by `s` around its center.
+    pub fn scaled_center(self, s: f64) -> Rect {
+        let (cx, cy) = self.center();
+        self.scaled(s, cx, cy)
+    }
+
+    pub fn center(&self) -> (f64, f64) {
+        (self.x + self.w / 2.0, self.y + self.h / 2.0)
+    }
+
+    /// The largest square centered in `self`, at most `max` wide.
+    pub fn centered_square(&self, max: f64) -> Rect {
+        let s = self.w.min(self.h).min(max);
+        let (cx, cy) = self.center();
+        Rect::new(cx - s / 2.0, cy - s / 2.0, s, s)
+    }
 }
 
 pub struct Params {

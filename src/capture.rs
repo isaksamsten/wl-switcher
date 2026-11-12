@@ -1,10 +1,12 @@
 //! Per-capture state: one ext_image_copy_capture session, two buffers. A
-//! capture shows a window's preview in the strip (phase 3).
+//! capture shows a window's preview in the strip.
 //!
 //! Frames are captured into the back buffer; on `ready` the buffer is handed
-//! to the overlay (attached to the thumbnail subsurface) and the buffers swap.
+//! to the overlay (attached to the preview subsurface) and the buffers swap.
 //! In live mode the next frame is requested right away; the compositor only
-//! answers once the window has new content.
+//! answers once the window has new content. A static capture stops after
+//! one frame (`Paused`), and `set_live` resumes or pauses it, keeping the
+//! session and its buffers.
 //!
 //! Buffers are dmabufs when the session offers a device and a format the
 //! compositor accepts (the copy stays on the GPU), and shm otherwise. A
@@ -74,6 +76,9 @@ enum State {
         frame: ExtImageCopyCaptureFrameV1,
         realloc: bool,
     },
+    /// Not live: no further frames until `set_live(true)`. `realloc`: new
+    /// constraints arrived meanwhile.
+    Paused { realloc: bool },
     /// No further frames will be requested.
     Done,
 }
@@ -210,16 +215,6 @@ impl Capture {
     pub fn size(&self) -> Option<(u32, u32)> {
         let Constraints { width, height, .. } = self.constraints;
         (width > 0 && height > 0).then_some((width, height))
-    }
-
-    /// The first frame arrived or capturing gave up.
-    pub fn settled(&self) -> bool {
-        self.have_frame || matches!(self.state, State::Done)
-    }
-
-    /// The size is known (enough to lay the window out) or capturing gave up.
-    pub fn sized(&self) -> bool {
-        self.size().is_some() || self.settled()
     }
 
     /// "dmabuf" or "shm", once buffers are allocated.
@@ -373,7 +368,7 @@ impl Capture {
                 match &mut self.state {
                     State::Done => {}
                     // The in-flight frame will fail or complete; reallocate after it.
-                    State::InFlight { realloc, .. } => *realloc = true,
+                    State::InFlight { realloc, .. } | State::Paused { realloc } => *realloc = true,
                     State::Starting | State::Idle => return self.apply_constraints(g, qh),
                 }
             }
@@ -418,7 +413,7 @@ impl Capture {
                     // Can only fail after the first frame, so nothing to report.
                     let _ = self.next_frame(realloc, g, qh);
                 } else {
-                    self.state = State::Done;
+                    self.state = State::Paused { realloc };
                 }
                 return Some(CaptureEvent::Frame(frame));
             }
@@ -453,6 +448,51 @@ impl Capture {
             bufs.busy[slot] = false;
         }
         self.request_frame(qh); // in case the capture was waiting for this buffer
+    }
+
+    /// Whether `buffer` is one of this capture's current buffers. Frames
+    /// handed out before a reallocation are gone and must not be attached.
+    pub fn owns(&self, buffer: &WlBuffer) -> bool {
+        (self.buffers.as_ref()).is_some_and(|b| b.slots.contains(buffer))
+    }
+
+    /// The overlay replaced a frame it never attached, so the compositor
+    /// won't release it: it is free again.
+    pub fn discard(&mut self, buffer: &WlBuffer, qh: &QueueHandle<App>) {
+        let slot = (self.buffers.as_ref()).and_then(|b| b.slots.iter().position(|s| s == buffer));
+        if let Some(slot) = slot {
+            self.buffer_released(slot, qh);
+        }
+    }
+
+    /// The overlay attached `buffer` (again): it is busy until released.
+    pub fn attached(&mut self, buffer: &WlBuffer) {
+        if let Some(bufs) = &mut self.buffers
+            && let Some(slot) = bufs.slots.iter().position(|s| s == buffer)
+        {
+            bufs.busy[slot] = true;
+        }
+    }
+
+    /// Capture continuously, or pause after the frame in flight. Resuming
+    /// applies constraints that changed while paused.
+    pub fn set_live(&mut self, live: bool, g: &Globals, qh: &QueueHandle<App>) {
+        if self.live == live {
+            return;
+        }
+        self.live = live;
+        match self.state {
+            State::Paused { realloc } if live => {
+                self.state = State::Idle;
+                // Past the first frame: nothing to report.
+                let _ = self.next_frame(realloc, g, qh);
+            }
+            // Waiting for a buffer to be released.
+            State::Idle if !live && self.have_frame => {
+                self.state = State::Paused { realloc: false };
+            }
+            _ => {}
+        }
     }
 }
 
