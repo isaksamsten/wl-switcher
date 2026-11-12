@@ -67,7 +67,7 @@ pub fn run(config: Option<PathBuf>) -> Result<(), Error> {
     WaylandSource::new(conn.clone(), queue).insert(event_loop.handle())?;
 
     appearance.refresh(&app.loop_handle, &mut |m| eprintln!("wl-switcher: {m}"));
-    app.config = appearance.config.clone();
+    use_config(&mut app, &appearance.config);
     // Start the worker now, so icons and labels are ready for the first show.
     app.prefetch();
 
@@ -118,7 +118,7 @@ pub fn run(config: Option<PathBuf>) -> Result<(), Error> {
                 } => {
                     let mut warn = |m: String| send(&stream, &Reply::Warn(m));
                     if appearance.refresh(&app.loop_handle, &mut warn) {
-                        app.config = appearance.config.clone();
+                        use_config(&mut app, &appearance.config);
                         app.config_changed();
                     }
                     match app.show(&req, &mut warn) {
@@ -159,12 +159,20 @@ pub fn run(config: Option<PathBuf>) -> Result<(), Error> {
         if active.is_none() && appearance.desktop.take_changed() {
             let mut warn = |m: String| eprintln!("wl-switcher: {m}");
             if appearance.refresh(&app.loop_handle, &mut warn) {
-                app.config = appearance.config.clone();
+                use_config(&mut app, &appearance.config);
                 app.config_changed();
                 app.prefetch();
             }
         }
     }
+}
+
+/// Make `config` the one in use, and (re)start the focus stream it names.
+fn use_config(app: &mut App, config: &Config) {
+    app.config = config.clone();
+    let handle = app.loop_handle.clone();
+    app.focus_stream
+        .configure(config.mru_event_stream.as_deref(), &handle);
 }
 
 /// Read the client's request, then watch for it hanging up.

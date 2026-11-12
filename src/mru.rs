@@ -46,6 +46,7 @@ impl Mru {
         self.order.retain(|i| i != id);
     }
 
+    #[cfg(test)]
     pub fn ids(&self) -> &[String] {
         &self.order
     }

@@ -33,6 +33,7 @@ use crate::cache::Cache;
 use crate::capture::{Capture, CaptureEvent, WindowId};
 use crate::config::Config;
 use crate::daemon::Incoming;
+use crate::focus::FocusStream;
 use crate::globals::Globals;
 use crate::icons;
 use crate::input::Input;
@@ -69,8 +70,10 @@ pub struct App {
     assets: Option<Rc<Assets>>,
     /// Icons, labels and shapes, kept between shows.
     cache: Rc<RefCell<Cache>>,
-    /// Focus order (phase 5 feeds it from the mru-event-stream).
+    /// Focus order, fed by `focus_stream`.
     pub mru: Mru,
+    /// The `mru-event-stream` command, while configured.
+    pub(crate) focus_stream: FocusStream,
     /// The switcher, while a show is in progress.
     pub overlay: Option<Overlay>,
     /// The show-delay or cancel fade timer of the current show.
@@ -104,6 +107,7 @@ impl App {
             assets: None,
             cache: Rc::new(RefCell::new(Cache::default())),
             mru: Mru::default(),
+            focus_stream: FocusStream::default(),
             overlay: None,
             timer: None,
             capture_timer: None,

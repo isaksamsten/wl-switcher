@@ -9,11 +9,11 @@ mod capture;
 mod config;
 mod daemon;
 mod dmabuf;
+mod focus;
 mod globals;
 mod icons;
 mod input;
 mod ipc;
-#[allow(dead_code)] // the focus stream: phase 5
 mod mru;
 mod options;
 mod overlay;
