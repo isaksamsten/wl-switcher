@@ -97,6 +97,7 @@ impl Switcher {
         Some(s)
     }
 
+    #[allow(dead_code)] // the strip: phase 3
     pub fn windows(&self) -> &[Window] {
         &self.windows
     }
@@ -115,6 +116,7 @@ impl Switcher {
     }
 
     /// The selected window's index within the selected app.
+    #[allow(dead_code)] // the strip: phase 3
     pub fn selected_window(&self) -> usize {
         self.window
     }
@@ -165,6 +167,7 @@ impl Switcher {
     }
 
     /// Select window `i` of the selected app (mouse hover in the strip).
+    #[allow(dead_code)] // the strip: phase 3
     pub fn select_window(&mut self, i: usize) {
         if self.mode == Mode::Windows && i < self.app_len() {
             self.window = i;

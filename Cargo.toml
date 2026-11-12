@@ -5,13 +5,21 @@ edition = "2024"
 rust-version = "1.88"
 description = "Alt+Tab application and window switcher for Wayland compositors"
 
-# Phase 0 only needs clap: the pure core (switcher, ipc, anim, options) is
-# Wayland-free. The rest of wl-expose's dependency set comes in with phase 1
-# (see PLAN.md), pinned to the same versions:
-#   cosmic-text 0.17, drm-fourcc 2, freedesktop-desktop-entry 0.8,
-#   freedesktop-icons 0.4, gbm 0.18, image 0.25, resvg 0.50, rustix 1,
-#   serde 1, smithay-client-toolkit 0.21, toml 1, wayland-client 0.31,
-#   wayland-protocols 0.32 (client, staging)
+# The same dependency set (and versions) as wl-expose, whose modules are
+# ported here (see PLAN.md).
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+cosmic-text = "0.17"
+drm-fourcc = "2"
+freedesktop-desktop-entry = { version = "0.8", default-features = false }
+freedesktop-icons = "0.4"
+gbm = { version = "0.18", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+resvg = { version = "0.50", default-features = false }
+rustix = { version = "1", features = ["process"] }
+serde = { version = "1", features = ["derive"] }
+smithay-client-toolkit = "0.21"
+toml = "1"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 

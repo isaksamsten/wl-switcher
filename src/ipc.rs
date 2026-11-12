@@ -4,30 +4,21 @@
 //! `<word>[ <escaped payload>]`, where the payload escapes `\` as `\\` and
 //! newlines as `\n`. The client sends a request terminated by `end`.
 //!
-//! Unlike wl-expose, a request while the switcher is open doesn't toggle it:
-//! it is a key press. It is applied to the open switcher and answered with
-//! `forwarded` right away. Only the client that opened the switcher waits for
-//! the outcome (`picked`, `cancelled` or `error`), and closing its connection
-//! cancels.
+//! A request opens the switcher. The client keeps its connection open and
+//! waits for the outcome (`picked`, `cancelled` or `error`); closing the
+//! connection cancels. Once open, the switcher handles all keys itself, so a
+//! request while it is open is answered with an error.
 
 use std::path::PathBuf;
 
 use crate::switcher::Step;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Command {
-    /// Open with this step, or apply it to the open switcher.
-    Step(Step),
-    /// Close the open switcher without picking.
-    Cancel,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
-    pub command: Command,
+    /// The step the switcher opens with.
+    pub step: Step,
     /// Ext toplevel identifiers of the windows to show; empty: all. A
-    /// filter: the daemon orders them by focus (see mru.rs). Ignored while
-    /// open.
+    /// filter: the daemon orders them by focus (see mru.rs).
     pub ids: Vec<String>,
     /// The output to show on, by name.
     pub output: Option<String>,
@@ -36,7 +27,7 @@ pub struct Request {
 impl Default for Request {
     fn default() -> Self {
         Self {
-            command: Command::Step(Step::NextApp),
+            step: Step::NextApp,
             ids: Vec::new(),
             output: None,
         }
@@ -49,8 +40,6 @@ pub enum Reply {
     /// The switcher closed on this window.
     Picked(String),
     Cancelled,
-    /// Applied to a switcher another client opened; that one gets the outcome.
-    Forwarded,
     Error(String),
 }
 
@@ -104,32 +93,28 @@ fn split(line: &str) -> (&str, Option<&str>) {
     }
 }
 
-impl Command {
-    pub fn name(self) -> &'static str {
-        match self {
-            Command::Step(Step::NextApp) => "next",
-            Command::Step(Step::PrevApp) => "prev",
-            Command::Step(Step::NextWindow) => "next-window",
-            Command::Step(Step::PrevWindow) => "prev-window",
-            Command::Cancel => "cancel",
-        }
+pub fn step_name(step: Step) -> &'static str {
+    match step {
+        Step::NextApp => "next",
+        Step::PrevApp => "prev",
+        Step::NextWindow => "next-window",
+        Step::PrevWindow => "prev-window",
     }
+}
 
-    pub fn from_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "next" => Command::Step(Step::NextApp),
-            "prev" => Command::Step(Step::PrevApp),
-            "next-window" => Command::Step(Step::NextWindow),
-            "prev-window" => Command::Step(Step::PrevWindow),
-            "cancel" => Command::Cancel,
-            _ => return None,
-        })
-    }
+pub fn step_from_name(name: &str) -> Option<Step> {
+    Some(match name {
+        "next" => Step::NextApp,
+        "prev" => Step::PrevApp,
+        "next-window" => Step::NextWindow,
+        "prev-window" => Step::PrevWindow,
+        _ => return None,
+    })
 }
 
 impl Request {
     pub fn encode(&self) -> String {
-        let mut out = line("command", Some(self.command.name()));
+        let mut out = line("command", Some(step_name(self.step)));
         for id in &self.ids {
             out += &line("id", Some(id));
         }
@@ -152,8 +137,7 @@ impl Request {
                 ("end", None) => return Ok(Some(req)),
                 ("command", p) => {
                     let name = payload(p)?;
-                    req.command =
-                        Command::from_name(&name).ok_or(format!("'{text}': unknown command"))?;
+                    req.step = step_from_name(&name).ok_or(format!("'{text}': unknown command"))?;
                 }
                 ("id", p) => req.ids.push(payload(p)?),
                 ("output", p) => req.output = Some(payload(p)?),
@@ -170,7 +154,6 @@ impl Reply {
             Reply::Warn(m) => line("warn", Some(m)),
             Reply::Picked(id) => line("picked", Some(id)),
             Reply::Cancelled => line("cancelled", None),
-            Reply::Forwarded => line("forwarded", None),
             Reply::Error(m) => line("error", Some(m)),
         }
     }
@@ -182,7 +165,6 @@ impl Reply {
             ("warn", p) => Reply::Warn(payload(p)?),
             ("picked", p) => Reply::Picked(payload(p)?),
             ("cancelled", None) => Reply::Cancelled,
-            ("forwarded", None) => Reply::Forwarded,
             ("error", p) => Reply::Error(payload(p)?),
             _ => return Err(format!("unknown reply '{text}'")),
         })
@@ -211,23 +193,23 @@ mod tests {
     }
 
     #[test]
-    fn commands() {
-        for c in [
-            Command::Step(Step::NextApp),
-            Command::Step(Step::PrevApp),
-            Command::Step(Step::NextWindow),
-            Command::Step(Step::PrevWindow),
-            Command::Cancel,
+    fn steps() {
+        for s in [
+            Step::NextApp,
+            Step::PrevApp,
+            Step::NextWindow,
+            Step::PrevWindow,
         ] {
-            assert_eq!(Command::from_name(c.name()), Some(c));
+            assert_eq!(step_from_name(step_name(s)), Some(s));
         }
-        assert_eq!(Command::from_name("toggle"), None);
+        assert_eq!(step_from_name("toggle"), None);
+        assert_eq!(step_from_name("cancel"), None);
     }
 
     #[test]
     fn request_roundtrip() {
         let req = Request {
-            command: Command::Step(Step::PrevWindow),
+            step: Step::PrevWindow,
             ids: vec!["1".into(), "x y".into(), "a\nb".into()],
             output: Some("DP-1".into()),
         };
@@ -256,7 +238,6 @@ mod tests {
             Reply::Warn("no window with ID '3'".into()),
             Reply::Picked("a\\b".into()),
             Reply::Cancelled,
-            Reply::Forwarded,
             Reply::Error("no windows to show".into()),
         ] {
             let enc = r.encode();
