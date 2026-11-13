@@ -69,6 +69,11 @@ impl Rect {
         let (cx, cy) = self.center();
         Rect::new(cx - s / 2.0, cy - s / 2.0, s, s)
     }
+
+    /// Grown by `d` on every side.
+    pub fn outset(&self, d: f64) -> Rect {
+        Rect::new(self.x - d, self.y - d, self.w + 2.0 * d, self.h + 2.0 * d)
+    }
 }
 
 pub struct Params {

@@ -29,16 +29,42 @@ pub struct Key {
     pub size: u32,
     /// The configured theme, if any.
     pub theme: Option<String>,
+    /// The buffer scale `size` includes.
+    pub scale: i32,
+    /// Drawn under the icon, which is then padded by its `pad`.
+    pub shadow: Option<crate::shadow::IconShadow>,
 }
 
 impl Key {
-    /// The key of `app_id`'s icon with `config`'s size and theme at `scale`.
+    /// The key of `app_id`'s icon with `config`'s size, theme and shadow
+    /// at `scale`.
     pub fn new(app_id: &str, config: &crate::config::Config, scale: i32) -> Self {
+        let scale = scale.max(1);
         Self {
             app_id: app_id.to_string(),
-            size: config.icon_size * scale.max(1) as u32,
+            size: config.icon_size * scale as u32,
             theme: config.theme().icon_theme.clone(),
+            scale,
+            shadow: config.icon_shadow(),
         }
+    }
+
+    /// The same icon without its shadow.
+    pub fn plain(&self) -> Self {
+        Self {
+            shadow: None,
+            ..self.clone()
+        }
+    }
+
+    /// Logical pixels the image reaches past the icon on every side.
+    pub fn pad(&self) -> i32 {
+        self.shadow.map_or(0, |s| s.pad())
+    }
+
+    /// The image's side in buffer pixels.
+    pub fn image_size(&self) -> u32 {
+        self.size + 2 * (self.pad() * self.scale) as u32
     }
 }
 

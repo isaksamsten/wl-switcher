@@ -152,6 +152,15 @@ pub struct Theme {
     /// How far the shadow is moved, `[x, y]`.
     #[serde(deserialize_with = "offset")]
     pub shadow_offset: [i32; 2],
+    /// Icon shadow color; alpha 0 disables icon shadows.
+    #[serde(deserialize_with = "color")]
+    pub icon_shadow_color: u32,
+    /// Icon shadow blur radius.
+    #[serde(deserialize_with = "px")]
+    pub icon_shadow_softness: u32,
+    /// How far the icon shadow is moved, `[x, y]`.
+    #[serde(deserialize_with = "offset")]
+    pub icon_shadow_offset: [i32; 2],
     /// Icon theme (a directory name); default: gsettings, then hicolor.
     pub icon_theme: Option<String>,
     #[serde(deserialize_with = "color")]
@@ -173,6 +182,9 @@ impl Default for Theme {
             shadow_softness: 30,
             shadow_spread: 0,
             shadow_offset: [0, 6],
+            icon_shadow_color: 0x00000059,
+            icon_shadow_softness: 6,
+            icon_shadow_offset: [0, 2],
             icon_theme: None,
             title_color: 0xffffffff,
             title_background: 0x000000b3,
@@ -339,6 +351,16 @@ impl Config {
             softness: t.shadow_softness as f64,
             spread: t.shadow_spread,
             offset: (t.shadow_offset[0], t.shadow_offset[1]),
+        })
+    }
+
+    /// The icon shadow settings; None if icon shadows are disabled.
+    pub fn icon_shadow(&self) -> Option<crate::shadow::IconShadow> {
+        let t = self.theme();
+        (t.icon_shadow_color & 0xff != 0).then(|| crate::shadow::IconShadow {
+            color: t.icon_shadow_color,
+            softness: t.icon_shadow_softness,
+            offset: (t.icon_shadow_offset[0], t.icon_shadow_offset[1]),
         })
     }
 
@@ -557,6 +579,9 @@ mod tests {
             shadow-softness = 0
             shadow-spread = -3
             shadow-offset = [2, -4]
+            icon-shadow-color = "00000040"
+            icon-shadow-softness = 4
+            icon-shadow-offset = [1, 3]
             icon-theme = "Papirus"
             title-color = "eeeeee"
             title-background = "00000080"
@@ -589,6 +614,9 @@ mod tests {
         assert_eq!(t.shadow_softness, 0);
         assert_eq!(t.shadow_spread, -3);
         assert_eq!(t.shadow_offset, [2, -4]);
+        assert_eq!(t.icon_shadow_color, 0x00000040);
+        assert_eq!(t.icon_shadow_softness, 4);
+        assert_eq!(t.icon_shadow_offset, [1, 3]);
         assert_eq!(t.icon_theme.as_deref(), Some("Papirus"));
         assert_eq!(
             (t.title_color, t.title_background),
@@ -670,6 +698,12 @@ mod tests {
             Config::parse("[appearance]\nshadow-color = \"00000000\"")
                 .unwrap()
                 .shadow()
+                .is_none()
+        );
+        assert!(
+            Config::parse("[appearance]\nicon-shadow-color = \"ffffff00\"")
+                .unwrap()
+                .icon_shadow()
                 .is_none()
         );
     }

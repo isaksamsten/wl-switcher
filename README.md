@@ -194,6 +194,9 @@ shadow-color = "#00000080" # Use 00000000 to disable shadows
 shadow-softness = 30
 shadow-spread = 0
 shadow-offset = [0, 6]
+icon-shadow-color = "#00000059" # Follows the icon's shape; 00000000 disables
+icon-shadow-softness = 6
+icon-shadow-offset = [0, 2]
 # icon-theme = "Papirus"
 
 [appearance.light]

@@ -428,6 +428,7 @@ struct Style {
     dot_color: u32,
     shadow: Option<shadow::Settings>,
     icon_theme: Option<String>,
+    icon_shadow: Option<shadow::IconShadow>,
     font: String,
     previews: Previews,
     card_height: f64,
@@ -612,6 +613,7 @@ impl Overlay {
                 dot_color: theme.dot_color,
                 shadow: config.shadow(),
                 icon_theme: theme.icon_theme.clone(),
+                icon_shadow: config.icon_shadow(),
                 font: config.font.clone(),
                 previews: config.previews,
                 card_height: config.strip_card_height,
@@ -721,6 +723,8 @@ impl Overlay {
             app_id: app_id.to_string(),
             size: self.style.icon_size * self.scale as u32,
             theme: self.style.icon_theme.clone(),
+            scale: self.scale,
+            shadow: self.style.icon_shadow,
         }
     }
 
@@ -1426,6 +1430,10 @@ impl Overlay {
         let icon = icon_at(ex.map_or(self.switcher.selected_app(), |e| e.app))
             .scaled(s_open, pcx, pcy);
         let dim_alpha = self.gate(base);
+        let keys: Vec<icons::Key> = (self.switcher.apps().iter())
+            .map(|a| self.icon_key(&a.app_id))
+            .collect();
+        let icon_size = self.style.icon_size as f64;
         let scene = &mut self.scene;
 
         if let (Some(dim), Some(buffer)) = (&mut scene.dim, &self.dim_buffer) {
@@ -1483,20 +1491,18 @@ impl Overlay {
         );
 
         let cache = self.cache.borrow();
-        for (i, app) in self.switcher.apps().iter().enumerate() {
+        for (i, key) in keys.iter().enumerate() {
             let r = icon_at(i);
             // The strip's app's icon became the strip (and the icon its
             // selected card grows out of).
             let strip_app = ex.is_some_and(|e| e.app == i);
-            let key = icons::Key {
-                app_id: app.app_id.clone(),
-                size: self.style.icon_size * self.scale as u32,
-                theme: self.style.icon_theme.clone(),
-            };
-            let buffer = cache.icon(&key).filter(|_| !strip_app);
-            let size = key.size as f64;
+            let buffer = cache.icon(key).filter(|_| !strip_app);
+            let size = key.image_size() as f64;
             let icon = buffer.as_ref().map(|b| (b, (size, size)));
-            place_clipped(&mut scene.icons[i], icon, r, clip, &xf, alpha);
+            // The image reaches past the icon by its shadow, which shrinks
+            // with the icon.
+            let padded = r.outset(key.pad() as f64 * r.w / icon_size);
+            place_clipped(&mut scene.icons[i], icon, padded, clip, &xf, alpha);
 
             let dots = self.dot_shapes.get(i).and_then(|s| s.as_ref()).map(|s| {
                 let rect = bar::Rect::new(
@@ -1565,8 +1571,16 @@ impl Overlay {
         };
         // The cards' app: while the strip collapses after Tab, the
         // selected app is the next one already; `icon` is the cards'.
-        let strip_icon =
-            (self.strip.as_ref()).and_then(|s| self.cache.borrow().icon(&self.icon_key(&s.app_id)));
+        let strip_key = (self.strip.as_ref()).map(|s| self.icon_key(&s.app_id));
+        let strip_icon = (strip_key.as_ref()).and_then(|k| self.cache.borrow().icon(k));
+        // Logical pixels the strip icon's image reaches past the icon at
+        // `icon_size`, and the icon without its shadow, in buffer pixels.
+        let pad = strip_key.as_ref().map_or(0, |k| k.pad()) as f64;
+        let icon_size = self.style.icon_size as f64;
+        let unpadded = strip_key.as_ref().map(|k| {
+            let p = (k.pad() * k.scale) as f64;
+            [p, p, k.size as f64, k.size as f64]
+        });
         let card_alphas: Vec<f64> = match &self.strip {
             Some(s) => {
                 let sel = self.strip_sel.target.round() as usize;
@@ -1614,19 +1628,21 @@ impl Overlay {
             let preview = (self.previews.iter_mut())
                 .find(|p| p.window == s.windows[i])
                 .filter(|p| p.frame.as_ref().is_some_and(|f| p.capture.owns(&f.buffer)));
-            let (buffer, transform) = match (&preview, self.style.previews) {
-                (_, Previews::Off) => (strip_icon.as_ref(), Transform::Normal),
+            // Cards get their own shadow: the icon is shown without its.
+            let (buffer, transform, src) = match (&preview, self.style.previews) {
+                (_, Previews::Off) => (strip_icon.as_ref(), Transform::Normal, unpadded),
                 (Some(p), _) => {
                     let f = p.frame.as_ref().expect("filtered");
-                    (Some(&f.buffer), f.transform)
+                    (Some(&f.buffer), f.transform, None)
                 }
-                (None, _) => (Some(&self.placeholder), Transform::Normal),
+                (None, _) => (Some(&self.placeholder), Transform::Normal, None),
             };
             // Hidden while transparent. Detaching releases the buffer; it
             // is marked busy again when re-attached.
             match buffer {
                 Some(buffer) if a > 0.0 => {
                     sub.set_transform(transform);
+                    sub.crop(src);
                     if sub.show(buffer)
                         && let Some(p) = preview
                         && let Some(f) = &mut p.frame
@@ -1666,6 +1682,7 @@ impl Overlay {
         // The icon on top of the selected card, fading out by halfway.
         let growth = lerp(1.0, MORPH_ICON_GROWTH, morph);
         let r = selected.centered_square(icon.w * growth);
+        let r = r.outset(pad * r.w / icon_size);
         scene.morph_icon.present(strip_icon.as_ref(), r, icon_alpha);
 
         // The title sits on the bottom of the selected card.

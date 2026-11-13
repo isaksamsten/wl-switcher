@@ -13,6 +13,10 @@
 //! The bar's panel has rounded corners. It is rendered together with its
 //! shadow into one image (`panel`), the shadow left out where the panel
 //! covers it.
+//!
+//! Icons get a shadow of their own shape, like CSS `drop-shadow`: their
+//! alpha, moved and blurred (three box blurs approximating the Gaussian),
+//! under the icon in one padded image (`icon`).
 
 use crate::pixels::Image;
 
@@ -150,6 +154,122 @@ fn erf(x: f64) -> f64 {
     let p = 1.0 + (0.278393 + (0.230389 + 0.078108 * a * a) * a) * a;
     let p2 = p * p;
     x.signum() * (1.0 - 1.0 / (p2 * p2))
+}
+
+/// An icon's drop shadow, in logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IconShadow {
+    /// 0xRRGGBBAA, not premultiplied.
+    pub color: u32,
+    /// Blur radius; sigma = softness / 2.
+    pub softness: u32,
+    pub offset: (i32, i32),
+}
+
+impl IconShadow {
+    /// How far the image reaches past the icon on every side, so the icon
+    /// stays centered in it.
+    pub fn pad(&self) -> i32 {
+        let extent = (3.0 * self.softness as f64 / 2.0).ceil() as i32;
+        extent + self.offset.0.abs().max(self.offset.1.abs())
+    }
+}
+
+/// `img` over its shadow at buffer `scale`, padded by `s.pad()` logical
+/// pixels on every side.
+pub fn icon(img: &Image, s: &IconShadow, scale: i32) -> Image {
+    let scale = scale.max(1);
+    let pad = (s.pad() * scale) as usize;
+    let (iw, ih) = (img.width as usize, img.height as usize);
+    let (w, h) = (iw + 2 * pad, ih + 2 * pad);
+    // The icon's alpha, moved by the offset.
+    let mut alpha = vec![0f32; w * h];
+    let (ox, oy) = (
+        (pad as i32 + s.offset.0 * scale) as usize,
+        (pad as i32 + s.offset.1 * scale) as usize,
+    );
+    for y in 0..ih {
+        for x in 0..iw {
+            alpha[(y + oy) * w + x + ox] = img.data[(y * iw + x) * 4 + 3] as f32 / 255.0;
+        }
+    }
+    let sigma = s.softness as f64 / 2.0 * scale as f64;
+    for r in box_radii(sigma) {
+        box_blur(&mut alpha, w, h, r, true);
+        box_blur(&mut alpha, w, h, r, false);
+    }
+    let color = premultiplied(s.color).map(|c| c as f32);
+    let mut data = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let a = alpha[y * w + x];
+            let icon = (x.checked_sub(pad).filter(|&x| x < iw))
+                .zip(y.checked_sub(pad).filter(|&y| y < ih))
+                .map(|(x, y)| &img.data[(y * iw + x) * 4..][..4]);
+            let px = match icon {
+                Some(p) => [p[0], p[1], p[2], p[3]].map(|c| c as f32 / 255.0),
+                None => [0.0; 4],
+            };
+            let cover = px[3];
+            for k in 0..4 {
+                let v = px[k] + color[k] * a * (1.0 - cover);
+                data.push((v * 255.0).round().clamp(0.0, 255.0) as u8);
+            }
+        }
+    }
+    Image {
+        width: w as u32,
+        height: h as u32,
+        data,
+    }
+}
+
+/// The radii of three box blurs that together approximate a Gaussian
+/// with `sigma` (<https://www.peterkovesi.com/papers/FastGaussianSmoothing.pdf>).
+fn box_radii(sigma: f64) -> [usize; 3] {
+    if sigma <= 0.0 {
+        return [0; 3];
+    }
+    let n = 3.0;
+    let ideal = (12.0 * sigma * sigma / n + 1.0).sqrt();
+    let mut lo = ideal.floor() as i64;
+    if lo % 2 == 0 {
+        lo -= 1;
+    }
+    let lo = lo.max(1);
+    let hi = lo + 2;
+    let (lf, nf) = (lo as f64, n);
+    let m = ((12.0 * sigma * sigma - nf * lf * lf - 4.0 * nf * lf - 3.0 * nf) / (-4.0 * lf - 4.0))
+        .round() as i64;
+    [0, 1, 2].map(|i| (if i < m { lo } else { hi } as usize - 1) / 2)
+}
+
+/// Blur the `w`x`h` plane with a box of radius `r` along rows
+/// (`horizontal`) or columns; outside the plane counts as 0.
+fn box_blur(plane: &mut [f32], w: usize, h: usize, r: usize, horizontal: bool) {
+    if r == 0 {
+        return;
+    }
+    let (len, lines) = if horizontal { (w, h) } else { (h, w) };
+    let at = |line: usize, i: usize| if horizontal { line * w + i } else { i * w + line };
+    let norm = 1.0 / (2 * r + 1) as f32;
+    let mut line_buf = vec![0f32; len];
+    for line in 0..lines {
+        for i in 0..len {
+            line_buf[i] = plane[at(line, i)];
+        }
+        // The sum over [i - r, i + r].
+        let mut sum: f32 = line_buf[..r.min(len)].iter().sum();
+        for i in 0..len {
+            if i + r < len {
+                sum += line_buf[i + r];
+            }
+            if i > r {
+                sum -= line_buf[i - r - 1];
+            }
+            plane[at(line, i)] = sum * norm;
+        }
+    }
 }
 
 /// A panel and its shadow in one image.
@@ -493,5 +613,65 @@ mod tests {
         );
         assert_eq!(pixel(&p, -2, 10, 1)[3], 255);
         assert_eq!(pixel(&p, 10, 10, 1)[3], 0);
+    }
+
+    /// A `size`x`size` opaque white disc.
+    fn disc(size: u32) -> Image {
+        let c = size as f64 / 2.0;
+        let mut data = Vec::new();
+        for y in 0..size {
+            for x in 0..size {
+                let d = ((x as f64 + 0.5 - c).powi(2) + (y as f64 + 0.5 - c).powi(2)).sqrt();
+                let a = (c - d).clamp(0.0, 1.0);
+                data.extend_from_slice(&[(a * 255.0) as u8; 4]);
+            }
+        }
+        Image {
+            width: size,
+            height: size,
+            data,
+        }
+    }
+
+    #[test]
+    fn icon_shadow_follows_the_icon() {
+        let s = IconShadow {
+            color: 0x000000ff,
+            softness: 6,
+            offset: (0, 2),
+        };
+        assert_eq!(s.pad(), 9 + 2);
+        let img = disc(40);
+        let out = icon(&img, &s, 2);
+        let pad = (s.pad() * 2) as u32;
+        assert_eq!((out.width, out.height), (40 + 2 * pad, 40 + 2 * pad));
+        let px = |x: u32, y: u32| &out.data[((y * out.width + x) * 4) as usize..][..4];
+        // The icon is unchanged where it is opaque.
+        let c = out.width / 2;
+        assert_eq!(px(c, c), &[255; 4]);
+        // A shadow just outside the disc, stronger below than above,
+        // left and right the same; nothing in the corners or at the edge.
+        let (below, above) = (px(c, pad + 42)[3], px(c, pad - 2)[3]);
+        assert!(below > above && above > 0, "{below} {above}");
+        assert_eq!(px(pad - 2, c), px(out.width - 1 - (pad - 2), c));
+        assert_eq!(px(0, 0)[3], 0);
+        assert!(px(c, out.height - 1)[3] <= 1);
+        // Black: premultiplied color channels stay 0 in the shadow.
+        assert_eq!(&px(c, pad + 42)[..3], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn icon_hard_shadow() {
+        let s = IconShadow {
+            color: 0xff000080,
+            softness: 0,
+            offset: (3, 0),
+        };
+        let img = disc(20);
+        let out = icon(&img, &s, 1);
+        assert_eq!(out.width, 26);
+        // Right of the disc, inside the moved copy: the half-alpha red.
+        let k = ((13 * out.width + 3 + 21) * 4) as usize;
+        assert_eq!(&out.data[k..k + 4], &[0, 0, 128, 128]);
     }
 }

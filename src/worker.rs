@@ -169,15 +169,22 @@ fn run(inbox: mpsc::Receiver<Job>, done: channel::Sender<Done>) {
         let result = match job {
             Job::Icon { key, font } => {
                 icons.load_entries();
-                let image = match icons.get(&key) {
+                // Decoded (or lettered) without the shadow, which is drawn
+                // on top.
+                let plain = key.plain();
+                let image = match icons.get(&plain) {
                     Some(image) => image,
                     None => letters
-                        .entry((key.clone(), font))
+                        .entry((plain, font))
                         .or_insert_with_key(|(key, font)| {
                             let text = text.get_or_insert_with(Text::new);
                             Arc::new(text.letter(&key.app_id, key.size, font))
                         })
                         .clone(),
+                };
+                let image = match &key.shadow {
+                    Some(s) => Arc::new(crate::shadow::icon(&image, s, key.scale)),
+                    None => image,
                 };
                 Done::Icon { key, image }
             }
